@@ -1,9 +1,3 @@
-warning: `VIRTUAL_ENV=/Users/I574987/miniconda3/envs/py38` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
-[WARNING - pydoc_markdown.main]: Unknown configuration options:
-Unknown key(s) "{'modules'}" at:
-In "pydoc-markdown.yml"
-  $: TypeHint(pydoc_markdown.PydocMarkdown)
-
 <a id="agent_tco"></a>
 
 # agent\_tco
