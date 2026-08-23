@@ -1,6 +1,6 @@
 [project]
 name = "agent-tco"
-version = "0.0.2"
+version = "0.0.7"
 license = { file = "LICENSE" }
 description = "agent-tco: Pareto-optimal configuration of agentic workflows."
 readme = "README.md"
