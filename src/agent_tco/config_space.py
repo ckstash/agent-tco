@@ -19,7 +19,7 @@ Example::
         TierOption(
             step_index=1, label="Extract",
             tiers=[tier_a, tier_b, tier_c],
-            acr_by_tier={tier_a: 0.98, tier_b: 0.96, tier_c: 0.93},
+            q_by_tier={tier_a: 0.98, tier_b: 0.96, tier_c: 0.93},
             hitl_by_tier={tier_a: 0.01, tier_b: 0.02, tier_c: 0.03},
         ),
         # ... one TierOption per step
@@ -43,23 +43,25 @@ class TierOption:
 
     step_index: int
     tiers: list[TierCost]
-    acr_by_tier: dict[TierCost, float]
+    q_by_tier: dict[TierCost, float]
     hitl_by_tier: dict[TierCost, float]
+    partial_by_tier: dict[TierCost, float] = field(default_factory=dict)
     avg_output_tokens: int = 500
     label: str = ""
 
     def step_config(self, tier: TierCost) -> StepConfig:
         """Return a StepConfig for this step at the given tier."""
-        if tier not in self.acr_by_tier:
+        if tier not in self.q_by_tier:
             raise ValueError(
-                f"Tier '{tier.tier_id}' not in acr_by_tier for step {self.step_index}"
+                f"Tier '{tier.tier_id}' not in q_by_tier for step {self.step_index}"
             )
         return StepConfig(
             step_index=self.step_index,
             model_tier=tier.tier_id,
-            acr=self.acr_by_tier[tier],
+            q=self.q_by_tier[tier],
             hitl_prob=self.hitl_by_tier.get(tier, 0.0),
             inference_cost=(tier.cost_per_1k_tokens * self.avg_output_tokens / 1000),
+            partial_prob=self.partial_by_tier.get(tier, 0.0),
         )
 
 
@@ -104,7 +106,7 @@ class ConfigSpaceBuilder:
         """Return a targeted grid of configurations using critical step sensitivity screening.
 
         Generates:
-        - One all-same-tier config per tier (j1, j2, ... for each tier level)
+        - One all-same-tier anchor per tier
         - For each step × tier combination where the step is a bottleneck candidate:
           upgrade that step to that tier, keep all others at the cheapest tier.
 

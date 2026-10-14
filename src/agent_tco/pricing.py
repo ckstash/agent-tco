@@ -64,15 +64,17 @@ def inference_cost(output_tokens: int, tier: TierCost) -> float:
 def step_config_from_tier(
     step_index: int,
     tier: TierCost,
-    acr: float,
+    q: float,
     hitl_prob: float,
     avg_output_tokens: int = 500,
+    partial_prob: float = 0.0,
 ) -> StepConfig:
     """Construct a StepConfig from a TierCost and estimated average token usage."""
     return StepConfig(
         step_index=step_index,
         model_tier=tier.tier_id,
-        acr=acr,
+        q=q,
         hitl_prob=hitl_prob,
         inference_cost=inference_cost(avg_output_tokens, tier),
+        partial_prob=partial_prob,
     )

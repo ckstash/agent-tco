@@ -21,8 +21,47 @@ import numpy as np
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from agent_tco.experiment import MeasuredConfigResult
     from agent_tco.grid import GridResult
     from agent_tco.model import WorkflowConfig
+
+
+def plot_measured_pareto_frontier(
+    results: list["MeasuredConfigResult"] | tuple["MeasuredConfigResult", ...],
+    frontier: list["MeasuredConfigResult"] | tuple["MeasuredConfigResult", ...] | None = None,
+    figsize: tuple[float, float] = (7.0, 5.5),
+    title: str = "Measured configuration frontier",
+) -> "matplotlib.figure.Figure":
+    """Plot measured ACR/E[TCO] results with 95% marginal error bars."""
+    from agent_tco.experiment import measured_pareto_frontier
+
+    selected = list(frontier) if frontier is not None else measured_pareto_frontier(results)
+    selected_ids = {result.config_id for result in selected}
+    fig, ax = plt.subplots(figsize=figsize)
+    for result in results:
+        color = "steelblue" if result.config_id in selected_ids else "0.65"
+        ax.errorbar(
+            result.expected_tco,
+            result.acr,
+            xerr=[[result.expected_tco-result.tco_ci_lower],
+                  [result.tco_ci_upper-result.expected_tco]],
+            yerr=[[result.acr-result.acr_ci_lower],
+                  [result.acr_ci_upper-result.acr]],
+            fmt="o", color=color, ecolor=color, capsize=2,
+        )
+        if result.config_id in selected_ids:
+            ax.annotate(result.config_id, (result.expected_tco, result.acr),
+                        xytext=(4, 4), textcoords="offset points", fontsize=8)
+    if len(selected) > 1:
+        ordered = sorted(selected, key=lambda result: result.expected_tco)
+        ax.plot([result.expected_tco for result in ordered],
+                [result.acr for result in ordered], color="steelblue")
+    ax.set_xlabel("Measured expected TCO per incoming task")
+    ax.set_ylabel("Measured Autonomous Completion Rate")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig
 
 
 def plot_pareto_frontier(
@@ -43,7 +82,7 @@ def plot_pareto_frontier(
         results: list of GridResult objects (pareto_frontier() should be called first).
         manual_process_cost: if provided, draws a mu = C_manual iso-metric line.
         label_frontier: annotate Pareto-optimal points with their config_id.
-        style: matplotlib style string. Use "paper" for publication-quality serif output.
+        style: use ``"publication"`` for publication-quality serif output.
         figsize: figure size in inches.
         title: axes title.
         x_min: left bound of the x-axis (E[TCO]). Default 0.0.
@@ -64,7 +103,7 @@ def plot_pareto_frontier(
         fig = plot_pareto_frontier(results, y_min=0.6, y_max=1.0)
     """
 
-    if style == "paper":
+    if style == "publication":
         matplotlib.rcParams.update({
             "font.family": "serif",
             "font.size": 10,
@@ -173,7 +212,7 @@ def plot_sensitivity(
     Args:
         config: baseline WorkflowConfig (typically all-cheapest-tier).
         step_labels: optional dict mapping step_index -> human-readable label.
-        style: matplotlib style. Use "paper" for publication-quality output.
+        style: use ``"publication"`` for publication-quality output.
         figsize: figure size in inches.
         color: bar color.
         y_min: lower bound of the y-axis. Default 0.0. Pass a value > 0 to
@@ -199,7 +238,7 @@ def plot_sensitivity(
 
     from agent_tco.sensitivity import critical_step_sensitivity
 
-    if style == "paper":
+    if style == "publication":
         matplotlib.rcParams.update({
             "font.family": "serif",
             "font.size": 10,
@@ -252,7 +291,7 @@ def plot_scenario_breakdown(
 
     from agent_tco.model import Scenario
 
-    if style == "paper":
+    if style == "publication":
         matplotlib.rcParams.update({"font.family": "serif", "font.size": 9})
 
     sorted_results = sorted(results, key=lambda r: r.executive_metric)

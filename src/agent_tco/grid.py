@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import warnings
+import math
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
-from scipy.stats import beta as beta_dist
 
 from agent_tco.model import CostParams, Scenario, WorkflowConfig
 from agent_tco.simulator import WorkflowSimulator
@@ -18,9 +16,10 @@ class ScenarioStats:
 
     scenario: Scenario
     probability: float   # empirical P_i = count_i / N
-    ci_lower: float      # 95% Beta credible interval lower bound
-    ci_upper: float      # 95% Beta credible interval upper bound
+    ci_lower: float      # 95% Wilson confidence interval lower bound
+    ci_upper: float      # 95% Wilson confidence interval upper bound
     mean_cost: float     # empirical mean cost within this scenario (0.0 if no runs)
+    mean_review_events: float = 0.0
 
 
 @dataclass
@@ -33,12 +32,17 @@ class GridResult:
     acr: float                  # P(i1) + P(i2)
     expected_tco: float         # sum_i P_i * mean_cost_i
     executive_metric: float     # expected_tco / acr; inf if acr == 0
+    acr_ci_lower: float = 0.0
+    acr_ci_upper: float = 1.0
+    tco_ci_lower: float = 0.0
+    tco_ci_upper: float = float("inf")
     pareto_dominated: bool = False
+    cost_params: CostParams | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a flat dict suitable for JSON serialization or DataFrame construction.
 
-        Scenario probabilities, credible intervals, and mean costs are included
+        Scenario probabilities, Wilson confidence intervals, and mean costs are included
         as separate columns (e.g. 'p_i1', 'ci_lo_i1', 'ci_hi_i1', 'cost_i1').
         """
         row: dict[str, Any] = {
@@ -47,14 +51,25 @@ class GridResult:
             "acr": self.acr,
             "expected_tco": self.expected_tco,
             "executive_metric": self.executive_metric,
+            "acr_ci_lower": self.acr_ci_lower,
+            "acr_ci_upper": self.acr_ci_upper,
+            "tco_ci_lower": self.tco_ci_lower,
+            "tco_ci_upper": self.tco_ci_upper,
             "pareto_dominated": self.pareto_dominated,
         }
+        if self.cost_params is not None:
+            row.update({
+                "labor_rate": self.cost_params.labor_rate,
+                "review_time_hours": self.cost_params.review_time_hours,
+                "manual_process_cost": self.cost_params.manual_process_cost,
+            })
         for scenario, stats in self.scenario_stats.items():
             v = scenario.value
             row[f"p_{v}"] = stats.probability
             row[f"ci_lo_{v}"] = stats.ci_lower
             row[f"ci_hi_{v}"] = stats.ci_upper
             row[f"cost_{v}"] = stats.mean_cost
+            row[f"review_events_{v}"] = stats.mean_review_events
         return row
 
     @staticmethod
@@ -64,11 +79,15 @@ class GridResult:
         return pd.DataFrame([r.to_dict() for r in results])
 
 
-def _beta_ci(k: int, n: int) -> tuple[float, float]:
-    """Return the 95% Beta posterior credible interval for k successes in n trials."""
-    lower = float(beta_dist.ppf(0.025, k + 1, n - k + 1))
-    upper = float(beta_dist.ppf(0.975, k + 1, n - k + 1))
-    return lower, upper
+def _wilson_ci(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    """Return a two-sided 95% Wilson confidence interval for a proportion."""
+    if n <= 0:
+        raise ValueError("n must be positive")
+    phat = k / n
+    denominator = 1.0 + z * z / n
+    center = (phat + z * z / (2.0 * n)) / denominator
+    radius = z * math.sqrt(phat * (1.0 - phat) / n + z * z / (4.0 * n * n)) / denominator
+    return max(0.0, center - radius), min(1.0, center + radius)
 
 
 def _config_seed(global_seed: int, config_id: str) -> int:
@@ -88,7 +107,7 @@ def _evaluate_one(args: tuple) -> GridResult:
     return _aggregate(config, runs, cost_params)
 
 
-def _aggregate(config: WorkflowConfig, runs: list, _cost_params: CostParams) -> GridResult:
+def _aggregate(config: WorkflowConfig, runs: list, cost_params: CostParams) -> GridResult:
     """Compute scenario statistics and composite metrics from a list of SimulationRun."""
     n = len(runs)
     scenario_stats: dict[Scenario, ScenarioStats] = {}
@@ -97,14 +116,16 @@ def _aggregate(config: WorkflowConfig, runs: list, _cost_params: CostParams) -> 
         matching = [r for r in runs if r.scenario == scenario]
         k = len(matching)
         probability = k / n
-        ci_lower, ci_upper = _beta_ci(k, n)
+        ci_lower, ci_upper = _wilson_ci(k, n)
         mean_cost = sum(r.total_cost for r in matching) / k if k > 0 else 0.0
+        mean_review_events = sum(r.review_count for r in matching) / k if k > 0 else 0.0
         scenario_stats[scenario] = ScenarioStats(
             scenario=scenario,
             probability=probability,
             ci_lower=ci_lower,
             ci_upper=ci_upper,
             mean_cost=mean_cost,
+            mean_review_events=mean_review_events,
         )
 
     acr = (
@@ -113,6 +134,16 @@ def _aggregate(config: WorkflowConfig, runs: list, _cost_params: CostParams) -> 
     )
     expected_tco = sum(s.probability * s.mean_cost for s in scenario_stats.values())
     exec_metric = expected_tco / acr if acr > 0 else float("inf")
+    acr_count = sum(
+        1 for run in runs if run.scenario in (Scenario.HAPPY_PATH, Scenario.RETRY_RESOLVED)
+    )
+    acr_ci_lower, acr_ci_upper = _wilson_ci(acr_count, n)
+    c_max = (
+        2.0 * sum(step.inference_cost for step in config.steps)
+        + len(config.steps) * cost_params.hitl_cost_per_event
+        + cost_params.manual_process_cost
+    )
+    radius = c_max * math.sqrt(math.log(40.0) / (2.0 * n))
 
     return GridResult(
         config=config,
@@ -121,34 +152,71 @@ def _aggregate(config: WorkflowConfig, runs: list, _cost_params: CostParams) -> 
         acr=acr,
         expected_tco=expected_tco,
         executive_metric=exec_metric,
+        acr_ci_lower=acr_ci_lower,
+        acr_ci_upper=acr_ci_upper,
+        tco_ci_lower=max(0.0, expected_tco - radius),
+        tco_ci_upper=expected_tco + radius,
+        cost_params=cost_params,
     )
 
 
 def recompute_tco(results: list[GridResult], new_cost_params: CostParams) -> list[GridResult]:
-    """Recompute E[TCO] and executive_metric for stored GridResults under new cost parameters.
+    """Reprice stored review and fallback costs without re-running behavior.
 
-    Scenario probability estimates are independent of cost parameters, so this
-    recomputes the cost-weighted sum without re-running any simulations.
-    The new_cost_params affect only the per-scenario mean costs if they were
-    cost-params-dependent; since mean_cost is stored from simulation, this
-    function recomputes expected_tco from stored mean_costs and probabilities
-    and does NOT re-simulate. The stored mean_costs already reflect the
-    cost_params used at simulation time.
+    Inference costs remain fixed because they belong to each ``StepConfig``.
+    Each scenario stores its mean review-event count, and aborted scenarios
+    contain exactly one manual-fallback charge. These statistics and the original
+    ``cost_params`` are sufficient to adjust each scenario mean.
 
-    To fully recompute with new cost params, re-run the simulation.
-    This function is useful only for updating the executive_metric threshold
-    comparison (C_manual) via new_cost_params.manual_process_cost.
+    Legacy results without original cost parameters cannot be repriced safely.
+    Exact results retain point TCO intervals; Monte Carlo TCO intervals are
+    reset because their run-level cost samples are not stored.
     """
     updated = []
     for r in results:
+        if r.cost_params is None:
+            raise ValueError(
+                f"Cannot reprice '{r.config.config_id}': original cost_params are unavailable"
+            )
+        old_review = r.cost_params.hitl_cost_per_event
+        new_review = new_cost_params.hitl_cost_per_event
+        old_manual = r.cost_params.manual_process_cost
+        new_manual = new_cost_params.manual_process_cost
+        repriced_stats: dict[Scenario, ScenarioStats] = {}
+        for scenario, stats in r.scenario_stats.items():
+            mean_cost = stats.mean_cost
+            if stats.probability == 0.0:
+                mean_cost = 0.0
+            else:
+                mean_cost += stats.mean_review_events * (new_review - old_review)
+            if stats.probability > 0.0 and scenario == Scenario.ABORTED:
+                mean_cost += new_manual - old_manual
+            repriced_stats[scenario] = ScenarioStats(
+                scenario=scenario,
+                probability=stats.probability,
+                ci_lower=stats.ci_lower,
+                ci_upper=stats.ci_upper,
+                mean_cost=mean_cost,
+                mean_review_events=stats.mean_review_events,
+            )
+        expected_tco = sum(
+            stats.probability * stats.mean_cost
+            for stats in repriced_stats.values()
+        )
+        exact = r.n_runs == 0
         new_r = GridResult(
             config=r.config,
             n_runs=r.n_runs,
-            scenario_stats=r.scenario_stats,
+            scenario_stats=repriced_stats,
             acr=r.acr,
-            expected_tco=r.expected_tco,
-            executive_metric=r.expected_tco / r.acr if r.acr > 0 else float("inf"),
-            pareto_dominated=r.pareto_dominated,
+            expected_tco=expected_tco,
+            executive_metric=expected_tco / r.acr if r.acr > 0 else float("inf"),
+            acr_ci_lower=r.acr_ci_lower,
+            acr_ci_upper=r.acr_ci_upper,
+            tco_ci_lower=expected_tco if exact else 0.0,
+            tco_ci_upper=expected_tco if exact else float("inf"),
+            pareto_dominated=False,
+            cost_params=new_cost_params,
         )
         updated.append(new_r)
     return updated
@@ -176,25 +244,13 @@ class GridSearch:
     ) -> int:
         """Return the minimum n_runs for E[TCO] estimation at target precision.
 
-        Uses the Hoeffding concentration bound:
-            N >= c_max^2 * log(6/delta) / (2 * epsilon^2)
-
-        For workflows with large c_max (e.g. high abort cost), this bound is
-        conservative. Use the effective per-run cost (typical run cost, ignoring
-        rare high-cost aborts) for a practical N recommendation.
+        Uses the direct Hoeffding concentration bound. ``c_max`` must bound every
+        run cost; a typical or truncated cost does not preserve the guarantee.
 
         Example:
-            GridSearch.recommended_n_runs(c_max=0.10, epsilon=0.05)  # returns ~143
+            GridSearch.recommended_n_runs(c_max=0.10, epsilon=0.05)  # returns 8
         """
         from agent_tco.sensitivity import sample_complexity
-        if c_max > 10:
-            warnings.warn(
-                f"c_max={c_max} is large; the Hoeffding bound will return an "
-                "impractically large N. Consider passing the effective cost scale "
-                "(typical per-run cost excluding rare high-cost aborts).",
-                UserWarning,
-                stacklevel=2,
-            )
         return sample_complexity(c_max, epsilon, delta)
 
     def evaluate(self, config: WorkflowConfig) -> GridResult:

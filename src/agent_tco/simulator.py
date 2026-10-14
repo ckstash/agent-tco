@@ -8,6 +8,7 @@ from agent_tco.model import (
     Scenario,
     SimulationRun,
     StepConfig,
+    StepOutcome,
     WorkflowConfig,
 )
 
@@ -19,9 +20,13 @@ class WorkflowSimulator:
     attempt, one retry is made. If the retry also fails, the run is aborted
     (scenario i6) and the opportunity cost is applied.
 
-    Pass an optional executor callable to drive steps with real LLM calls instead
-    of Bernoulli sampling. The executor must match StepExecutor protocol:
-    (step: StepConfig, context: dict) -> tuple[bool, bool] (completed, hitl_triggered).
+    Each attempt has one categorical outcome. Autonomous and human-assisted
+    completion advance to the next step; assisted completion also records review
+    cost. Partial completion terminates the run. A non-completion receives one
+    retry and then aborts.
+
+    An optional executor can return a StepOutcome. Legacy ``(completed, hitl)``
+    tuples remain supported.
     """
 
     def __init__(
@@ -45,32 +50,44 @@ class WorkflowSimulator:
         cost = 0.0
         retry_count = 0
         hitl_triggered = False
+        review_count = 0
         terminal = "success"
         context: dict = {}
 
         for step in config.steps:
             cost += step.inference_cost  # first-attempt inference cost
 
-            if self._executor is not None:
-                completed, hitl = self._executor(step, context)
-            else:
-                hitl = rng.random() < step.hitl_prob
-                completed = rng.random() < step.acr
+            outcome = self._attempt(step, context, rng)
 
-            if hitl:
+            if outcome == StepOutcome.HITL_SUCCESS:
                 hitl_triggered = True
+                review_count += 1
                 cost += self._cost_params.hitl_cost_per_event
+                continue
+            if outcome == StepOutcome.HITL_PARTIAL:
+                hitl_triggered = True
+                review_count += 1
+                cost += self._cost_params.hitl_cost_per_event
+                terminal = "partial"
+                break
 
-            if not completed:
+            if outcome == StepOutcome.INCOMPLETE:
                 # Single retry
                 retry_count += 1
                 cost += step.inference_cost  # retry inference cost
-                if self._executor is not None:
-                    completed, _ = self._executor(step, context)
-                else:
-                    completed = rng.random() < step.acr
-
-                if not completed:
+                outcome = self._attempt(step, context, rng)
+                if outcome == StepOutcome.HITL_SUCCESS:
+                    hitl_triggered = True
+                    review_count += 1
+                    cost += self._cost_params.hitl_cost_per_event
+                    continue
+                if outcome == StepOutcome.HITL_PARTIAL:
+                    hitl_triggered = True
+                    review_count += 1
+                    cost += self._cost_params.hitl_cost_per_event
+                    terminal = "partial"
+                    break
+                if outcome == StepOutcome.INCOMPLETE:
                     cost += self._cost_params.manual_process_cost
                     terminal = "aborted"
                     break
@@ -81,7 +98,22 @@ class WorkflowSimulator:
             total_cost=cost,
             retry_count=retry_count,
             hitl_triggered=hitl_triggered,
+            review_count=review_count,
         )
+
+    def _attempt(self, step: StepConfig, context: dict, rng: random.Random) -> StepOutcome:
+        """Execute or sample one attempt and return its categorical outcome."""
+        if self._executor is None:
+            return step.outcome_from_uniform(rng.random())
+        result = self._executor(step, context)
+        if isinstance(result, StepOutcome):
+            return result
+        completed, hitl = result
+        if completed and hitl:
+            return StepOutcome.HITL_SUCCESS
+        if completed:
+            return StepOutcome.AUTONOMOUS
+        return StepOutcome.INCOMPLETE
 
     def classify_scenario(
         self,

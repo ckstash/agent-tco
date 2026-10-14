@@ -15,25 +15,70 @@ class Scenario(Enum):
     ABORTED = "i6"             # s=aborted (any r, h)
 
 
+class StepOutcome(Enum):
+    """Mutually exclusive outcome of one step attempt."""
+
+    AUTONOMOUS = "autonomous"
+    HITL_SUCCESS = "hitl_success"
+    HITL_PARTIAL = "hitl_partial"
+    INCOMPLETE = "incomplete"
+
+
 @dataclass
 class StepConfig:
-    """Per-step configuration for one LLM touchpoint in a workflow."""
+    """Categorical per-attempt model for one touchpoint in a sequential workflow.
+
+    ``q`` denotes the probability of autonomous completion on one attempt.
+    ``hitl_prob`` denotes the probability that a reviewer completes the step,
+    and ``partial_prob`` denotes the probability that review produces a partial
+    terminal outcome. The residual probability is a retryable non-completion.
+    """
 
     step_index: int        # 1-based position in the workflow
     model_tier: str        # informational label, e.g. "A", "B", "C"
-    acr: float             # per-step autonomous completion rate in [0, 1]
-    hitl_prob: float       # probability of HITL trigger in [0, 1]
+    q: float               # autonomous-completion probability per attempt
+    hitl_prob: float       # HITL-assisted step-completion probability
     inference_cost: float  # cost per LLM call for this step (dollars)
+    partial_prob: float = 0.0  # HITL-assisted partial terminal probability
 
     def __post_init__(self) -> None:
-        if not (0.0 <= self.acr <= 1.0):
-            raise ValueError(f"acr must be in [0, 1]; got {self.acr} at step {self.step_index}")
+        if not (0.0 <= self.q <= 1.0):
+            raise ValueError(f"q must be in [0, 1]; got {self.q} at step {self.step_index}")
         if not (0.0 <= self.hitl_prob <= 1.0):
             raise ValueError(f"hitl_prob must be in [0, 1]; got {self.hitl_prob} at step {self.step_index}")
+        if not (0.0 <= self.partial_prob <= 1.0):
+            raise ValueError(
+                f"partial_prob must be in [0, 1]; got {self.partial_prob} at step {self.step_index}"
+            )
+        if self.q + self.hitl_prob + self.partial_prob > 1.0 + 1e-12:
+            raise ValueError(
+                "q + hitl_prob + partial_prob must be <= 1; "
+                f"got {self.q + self.hitl_prob + self.partial_prob} at step {self.step_index}"
+            )
         if self.inference_cost < 0:
             raise ValueError(f"inference_cost must be non-negative; got {self.inference_cost}")
         if self.step_index < 1:
             raise ValueError(f"step_index must be >= 1; got {self.step_index}")
+
+    @property
+    def incomplete_prob(self) -> float:
+        """Return the residual probability of retryable non-completion."""
+        return max(0.0, 1.0 - self.q - self.hitl_prob - self.partial_prob)
+
+    @property
+    def autonomous_pass_prob(self) -> float:
+        """Return autonomous completion probability with one retry."""
+        return self.q * (1.0 + self.incomplete_prob)
+
+    def outcome_from_uniform(self, value: float) -> StepOutcome:
+        """Map a uniform draw in [0, 1) to one categorical attempt outcome."""
+        if value < self.q:
+            return StepOutcome.AUTONOMOUS
+        if value < self.q + self.hitl_prob:
+            return StepOutcome.HITL_SUCCESS
+        if value < self.q + self.hitl_prob + self.partial_prob:
+            return StepOutcome.HITL_PARTIAL
+        return StepOutcome.INCOMPLETE
 
 
 @dataclass
@@ -92,3 +137,4 @@ class SimulationRun:
     total_cost: float
     retry_count: int
     hitl_triggered: bool
+    review_count: int = 0

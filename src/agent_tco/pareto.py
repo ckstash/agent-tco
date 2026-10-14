@@ -34,12 +34,12 @@ def pareto_frontier(results: list[GridResult]) -> list[GridResult]:
 
 
 def executive_metric(expected_tco: float, acr: float) -> float:
-    """Return expected_tco / acr; float('inf') if acr == 0."""
+    """Return the descriptive cost-effectiveness ratio E[TCO]/ACR."""
     if acr == 0:
         return float("inf")
     return expected_tco / acr
 
 
 def rank_by_executive_metric(results: list[GridResult]) -> list[GridResult]:
-    """Return results sorted ascending by executive_metric (lowest cost-per-outcome first)."""
+    """Return results sorted by the descriptive cost-effectiveness ratio."""
     return sorted(results, key=lambda r: r.executive_metric)
