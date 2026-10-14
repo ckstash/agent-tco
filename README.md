@@ -1,19 +1,52 @@
 # agent-tco
 
-**agent-tco** is a Python library for Pareto-optimal configuration of agentic workflows.
+`agent-tco` compares model assignments for agentic workflows on two objectives: Autonomous Completion Rate (ACR) and Expected Total Cost of Ownership (E[TCO]) per incoming task. It supports exact sequential and structured-block evaluation, approximate profile-based execution-graph simulation, and measured validation of shortlisted configurations.
 
----
+## Outcome model
+
+Each `StepConfig` defines mutually exclusive per-attempt probabilities,
+conditional on execution reaching that touchpoint with its required predecessors
+in a passing state.
+
+- `q` is autonomous completion on one attempt.
+- `hitl_prob` is human-assisted step completion, which advances to downstream work while removing the trajectory from ACR.
+- `partial_prob` is human-assisted partial completion.
+- The residual `1 - acr - hitl_prob - partial_prob` is retryable non-completion.
+
+The three supplied probabilities must sum to at most one. A non-completion receives one retry. Two consecutive non-completions invoke the configured manual fallback.
+
+### How workflow ACR and E[TCO] compose
+
+For a required series chain with autonomous-passage probabilities `a_k`, workflow
+ACR is `prod(a_k)` under the evaluator's conditional-independence assumption.
+The structured evaluator recursively applies the policy of each block instead of
+blindly multiplying arbitrary subgraphs: eager AND has the series reliability
+formula, independent OR has `1 - prod(1 - a_k)`, ordered fallback invokes later
+branches only after earlier failures, and bounded retry repeats its child.
+
+Costs add along each executed trajectory and E[TCO] averages those trajectory
+costs. Consequently, a stop-on-failure chain with invocation costs `c_k` has
+`c_1 + a_1*c_2 + a_1*a_2*c_3 + ...` before review and manual-fallback terms; it
+does not normally pay for unreached nodes. Eager parallel blocks do pay for every
+invoked branch. This reach-weighted accounting is why topology affects cost as
+well as reliability.
 
 ## Features
 
-- **Workflow simulator** with six-class scenario taxonomy (i1–i6): happy path, retry-resolved, HITL success, HITL partial, compound recovery, aborted.
-- **Grid search** — evaluates all candidate configurations with Beta credible intervals on scenario probabilities.
-- **Pareto frontier** — identifies non-dominated configurations on the ACR vs. E[TCO] plane.
-- **Critical step sensitivity analysis** — computes ∂ACR/∂q_k to prioritize which step to upgrade first.
-- **Tier pricing utilities** — built-in `TIER_A`, `TIER_B`, `TIER_C` constants covering frontier, mid-range, and lightweight models. Pass your own `TierCost(tier_id, cost_per_1k_tokens)` to use current pricing.
-- **`StepExecutor` protocol** — plug in real LLM calls or a `Mock` for testing, no SDK dependency.
-
----
+- Monte Carlo simulation with Wilson confidence intervals for scenario probabilities and ACR
+- Exact finite-state evaluation for categorical sequential chains
+- Full Cartesian enumeration and sensitivity-screened configuration sets
+- Pareto-frontier analysis on ACR and E[TCO]
+- Hoeffding intervals for expected cost using a true per-run cost bound
+- Categorical `StepOutcome` executor hook for measured model calls
+- JSON persistence and review/fallback repricing without re-running behavior
+- Exact compositional evaluation for nested series, eager AND, ordered-fallback OR, eager OR, and bounded-retry blocks
+- Exhaustive and deterministic budgeted guided search for structured-topology assignments
+- Discrete-event Monte Carlo for finite execution graphs with shared descendants, joins, routes, bounded cycles, first-success races, cancellation billing, and common-cause failures
+- Budgeted DAG assignment screening with uncertainty intervals
+- Balanced synchronous or bounded-concurrency asynchronous experiments through a user-supplied real-agent executor
+- Per-run measured evidence, measured Pareto extraction, JSON export, and frontier plotting
+- Reproducible stylized computational tests of the five conditional hypotheses
 
 ## Installation
 
@@ -21,124 +54,133 @@
 pip install agent-tco
 ```
 
-Built for Python 3.12 or above.
+Python 3.12 or later is required.
 
----
-
-## Quick Start
-
-### 1. Define configurations and run the grid search
+## Minimal example
 
 ```python
 from agent_tco import (
-    CostParams, GridSearch,
-    step_config_from_tier, WorkflowConfig,
-    TIER_A, TIER_B, TIER_C,
+    CostParams,
+    StepConfig,
+    WorkflowConfig,
+    evaluate_exact,
+    pareto_frontier,
 )
 
-cost_params = CostParams(
+costs = CostParams(
     labor_rate=60.0,
     review_time_hours=0.25,
-    manual_process_cost=50.0,
+    manual_process_cost=4.50,
 )
 
-# j3: all Tier C
-j3 = WorkflowConfig("j3", [
-    step_config_from_tier(k, TIER_C, acr=0.78 if k == 2 else 0.92, hitl_prob=0.20 if k == 4 else 0.05)
-    for k in range(1, 6)
+lightweight = WorkflowConfig("CC", [
+    StepConfig(1, "C", q=0.78, hitl_prob=0.08,
+               partial_prob=0.02, inference_cost=0.003),
+    StepConfig(2, "C", q=0.74, hitl_prob=0.10,
+               partial_prob=0.03, inference_cost=0.003),
 ])
 
-# j9: Tier B at step 2 (the bottleneck), Tier C elsewhere
-j9 = WorkflowConfig("j9", [
-    step_config_from_tier(k, TIER_B if k == 2 else TIER_C,
-                          acr=0.88 if k == 2 else 0.92,
-                          hitl_prob=0.08 if k == 2 else (0.20 if k == 4 else 0.05))
-    for k in range(1, 6)
+mixed = WorkflowConfig("BA", [
+    StepConfig(1, "B", q=0.88, hitl_prob=0.04,
+               partial_prob=0.01, inference_cost=0.08),
+    StepConfig(2, "A", q=0.94, hitl_prob=0.02,
+               partial_prob=0.005, inference_cost=0.50),
 ])
 
-gs = GridSearch(cost_params=cost_params, n_runs=300, seed=42)
-results = gs.evaluate_all([j3, j9])
-for r in results:
-    print(f"{r.config.config_id}: ACR={r.acr:.2f}  E[TCO]=${r.expected_tco:.2f}  M=${r.executive_metric:.2f}")
-```
-
-### 2. Compute the Pareto frontier and identify the recommended configuration
-
-```python
-from agent_tco import (
-    CostParams, GridSearch, WorkflowConfig,
-    step_config_from_tier, TIER_B, TIER_C,
-    pareto_frontier, rank_by_executive_metric,
-)
-
-cost_params = CostParams(labor_rate=60.0, review_time_hours=0.25, manual_process_cost=50.0)
-
-j3 = WorkflowConfig("j3", [
-    step_config_from_tier(k, TIER_C, acr=0.78 if k == 2 else 0.92, hitl_prob=0.20 if k == 4 else 0.05)
-    for k in range(1, 6)
-])
-j9 = WorkflowConfig("j9", [
-    step_config_from_tier(k, TIER_B if k == 2 else TIER_C,
-                          acr=0.88 if k == 2 else 0.92,
-                          hitl_prob=0.08 if k == 2 else (0.20 if k == 4 else 0.05))
-    for k in range(1, 6)
-])
-
-results = GridSearch(cost_params=cost_params, n_runs=300, seed=42).evaluate_all([j3, j9])
+results = [evaluate_exact(config, costs) for config in (lightweight, mixed)]
 frontier = pareto_frontier(results)
-best = rank_by_executive_metric(frontier)[0]
-print(f"Recommended: {best.config.config_id} — ${best.executive_metric:.2f} per autonomous outcome")
+for result in frontier:
+    print(result.config.config_id, result.acr, result.expected_tco)
 ```
 
----
+`E[TCO]/ACR` is available as `executive_metric`. It is a descriptive cost-effectiveness ratio. Compare E[TCO] directly with manual task cost when both alternatives deliver comparable task value.
 
-## Interpreting the Executive Metric
+## Repricing stored results
 
-The executive metric `M = E[TCO] / ACR` is the expected cost per autonomously delivered outcome. When `M < C_manual` (the cost of the manual process), the agent is economically viable at this configuration. If `M > C_manual` for every configuration on the Pareto frontier, no configuration is cost-effective and the business case does not hold.
+`save_results()` stores the original review and manual-fallback cost parameters.
+After loading results, `recompute_tco()` can change those two cost components
+without repeating workflow evaluation:
 
----
+```python
+from agent_tco import CostParams, load_results, pareto_frontier, recompute_tco
 
-## Using a real LLM executor
+stored = load_results("results.json")
+updated_costs = CostParams(
+    labor_rate=75.0,
+    review_time_hours=0.20,
+    manual_process_cost=12.0,
+)
+repriced = recompute_tco(stored, updated_costs)
+frontier = pareto_frontier(repriced)
+```
 
-The `StepExecutor` protocol accepts any callable `(step, context) -> (completed, hitl_triggered)`:
+Inference prices are part of each `StepConfig` and are not changed by
+`recompute_tco()`. Re-evaluate configurations after changing model behavior,
+transition probabilities, retry policy, topology, or inference cost.
+
+## Screening before measured validation
+
+Profiles should be calibrated from historical traces, controlled evaluations, or
+pilot runs. Use exact composition or DAG simulation to reduce the assignment
+space, then run the shortlist against representative inputs through the actual
+agent stack. `ProductionExperimentRunner` and
+`AsyncProductionExperimentRunner` randomize a balanced configuration/case
+schedule and aggregate observed autonomy, total cost, and latency. The supplied
+executor remains responsible for authentication, rate limiting, tracing,
+scoring, retries performed by the real agent, and provider billing telemetry.
+The measured Pareto frontier—not the simulated frontier—is the appropriate
+evidence for a deployment decision.
+
+`run_stylized_hypothesis_tests()` exercises model-implied comparative statics for
+convex capability prices, finite reliability ceilings, dependent redundancy,
+labor rates, and importance/review alignment. Its synthetic results are
+implementation checks and illustrations, not external empirical validation.
+
+## Reproducing the companion paper
+
+The exact synthetic profiles used by *Beyond Point Solutions: Cost-Quality
+Optimization of Multi-Model Agentic Workflows* are included in
+`agent_tco.paper`. The five-step example and its full frontier can be reproduced
+without copying constants from the manuscript:
+
+```python
+from agent_tco import evaluate_paper_chain, pareto_frontier
+
+chain_results = evaluate_paper_chain()
+chain_frontier = pareto_frontier(chain_results)
+print(len(chain_results), [r.config.config_id for r in chain_frontier])
+```
+
+The eight-touchpoint block-tree example exposes both reported searches:
 
 ```python
 from agent_tco import (
-    CostParams, WorkflowConfig, WorkflowSimulator,
-    step_config_from_tier, TIER_B, TIER_C,
+    evaluate_paper_structured_exhaustive,
+    evaluate_paper_structured_guided,
 )
 
-cost_params = CostParams(labor_rate=60.0, review_time_hours=0.25, manual_process_cost=50.0)
-
-j9 = WorkflowConfig("j9", [
-    step_config_from_tier(k, TIER_B if k == 2 else TIER_C,
-                          acr=0.88 if k == 2 else 0.92,
-                          hitl_prob=0.08 if k == 2 else (0.20 if k == 4 else 0.05))
-    for k in range(1, 6)
-])
-
-def my_llm_executor(step, context):
-    # Replace with your real LLM call.
-    # Return (completed: bool, hitl_triggered: bool).
-    completed = True
-    hitl_triggered = False
-    return completed, hitl_triggered
-
-sim = WorkflowSimulator(cost_params=cost_params, executor=my_llm_executor)
-run = sim.simulate_run(j9)
-print(run.scenario, run.total_cost)
+exact = evaluate_paper_structured_exhaustive()  # all 6,561 assignments
+guided = evaluate_paper_structured_guided()     # deterministic budget of 500
+print(len(exact.frontier), guided.evaluated)
 ```
 
-In tests, replace `my_llm_executor` with `Mock(return_value=(True, False))`.
+These profiles are synthetic evaluator checks, not calibrated production
+estimates. Both reported frontiers use deterministic exact evaluation; Monte
+Carlo is not required to reproduce them.
 
----
+## Scope
 
-## API Reference
-
-See [API.md](API.md).
-
----
+The sequential API executes chains with one retry after a non-completion. The
+structured API evaluates nested series, eager AND, ordered-fallback OR, eager OR,
+and bounded-retry blocks exactly under conditionally independent task outcomes.
+The DAG API approximately evaluates finite graphs using declared joins, routes,
+visit/attempt limits, duration profiles, cancellation policy, and common-cause
+domains. Every cycle must terminate through finite visit/event/time guards;
+unbounded hidden-state behavior is not modeled. Guided and DAG searches are
+heuristic and report a frontier only over evaluated assignments. Only exhaustive
+evaluation certifies its declared finite candidate space under evaluator
+assumptions.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT License
