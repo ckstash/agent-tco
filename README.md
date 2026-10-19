@@ -2,6 +2,22 @@
 
 `agent-tco` compares model assignments for agentic workflows on two objectives: Autonomous Completion Rate (ACR) and Expected Total Cost of Ownership (E[TCO]) per incoming task. It supports exact sequential and structured-block evaluation, approximate profile-based execution-graph simulation, and measured validation of shortlisted configurations.
 
+### Cost terminology
+
+The package name and public API use **TCO** as an umbrella term for expected
+trajectory cost. The computed boundary is determined by the supplied model and
+cost inputs; the library does not automatically add every acquisition,
+integration, infrastructure, governance, maintenance, or retirement cost that
+may belong to a full lifecycle TCO study.
+
+The [companion paper](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=7621679)
+uses the narrower term **expected operating cost (EOC)** for inference, retry,
+human-review, and terminal manual-replacement cost per incoming task. With the
+paper's supplied profiles, the library value exposed as
+`expected_tco` is exactly this EOC quantity. The names `agent-tco`, `agent_tco`,
+`expected_tco`, and `recompute_tco()` are retained for package and API
+compatibility.
+
 ## Outcome model
 
 Each `StepConfig` defines mutually exclusive per-attempt probabilities,
@@ -140,7 +156,70 @@ implementation checks and illustrations, not external empirical validation.
 
 The exact synthetic profiles used by *Beyond Point Solutions: Cost-Quality
 Optimization of Multi-Model Agentic Workflows* are included in
-`agent_tco.paper`. The five-step example and its full frontier can be reproduced
+`agent_tco.paper`. In this section, values printed from `expected_tco` are the
+paper's EOC values under its stated operating-cost boundary.
+
+From the repository root, install the package environment and run:
+
+```bash
+uv sync
+uv run python - <<'PY'
+from agent_tco import (
+    evaluate_paper_chain,
+    evaluate_paper_structured_exhaustive,
+    evaluate_paper_structured_guided,
+    pareto_frontier,
+)
+
+chain_results = evaluate_paper_chain()
+chain_frontier = pareto_frontier(chain_results)
+chain_best = min(chain_frontier, key=lambda result: result.executive_metric)
+print(
+    "chain", len(chain_results), len(chain_frontier),
+    chain_best.config.config_id,
+    f"ACR={chain_best.acr:.3f}",
+    f"EOC=${chain_best.expected_tco:.2f}",
+    f"EOC/ACR=${chain_best.executive_metric:.2f}",
+)
+
+structured = evaluate_paper_structured_exhaustive()
+structured_best = min(
+    structured.frontier,
+    key=lambda result: result.executive_metric,
+)
+guided = evaluate_paper_structured_guided()
+guided_recovers_frontier = {
+    result.config_id for result in guided.frontier
+} == {
+    result.config_id for result in structured.frontier
+}
+print(
+    "structured", len(structured.results), len(structured.frontier),
+    structured_best.config_id,
+    f"ACR={structured_best.acr:.3f}",
+    f"EOC=${structured_best.expected_tco:.2f}",
+    f"EOC/ACR=${structured_best.executive_metric:.2f}",
+)
+print("guided", guided.evaluated, len(guided.frontier), guided_recovers_frontier)
+PY
+```
+
+Expected output:
+
+```text
+chain 243 7 BABBB ACR=0.893 EOC=$2.76 EOC/ACR=$3.09
+structured 6561 8 BAAAABAA ACR=0.725 EOC=$4.85 EOC/ACR=$6.70
+guided 500 8 True
+```
+
+The first line reproduces the five-step chain's complete seven-point frontier
+and its minimum-ratio assignment. The second line reproduces the structured
+workflow's complete eight-point frontier and minimum-ratio assignment. The
+third line confirms retrospectively that the 500-evaluation guided search
+contains all eight frontier assignments for this constructed instance.
+
+The shorter Python calls below are useful when inspecting each result set
+interactively. The five-step example and its full frontier can be reproduced
 without copying constants from the manuscript:
 
 ```python
