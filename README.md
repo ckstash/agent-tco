@@ -149,13 +149,12 @@ evidence for a deployment decision.
 
 `run_stylized_hypothesis_tests()` exercises model-implied comparative statics for
 convex capability prices, finite reliability ceilings, dependent redundancy,
-labor rates, and importance/review alignment. Its synthetic results are
+labor rates, and importance/review alignment. Its constructed results are
 implementation checks and illustrations, not external empirical validation.
 
 ## Reproducing the companion paper
 
-The exact synthetic profiles used by *Beyond Point Solutions: Cost-Quality
-Optimization of Multi-Model Agentic Workflows* are included in
+The exact constructed profiles used by the paper are included in
 `agent_tco.paper`. In this section, values printed from `expected_tco` are the
 paper's EOC values under its stated operating-cost boundary.
 
@@ -243,7 +242,7 @@ guided = evaluate_paper_structured_guided()     # deterministic budget of 500
 print(len(exact.frontier), guided.evaluated)
 ```
 
-These profiles are synthetic evaluator checks, not calibrated production
+These profiles are constructed evaluator checks, not calibrated production
 estimates. Both reported frontiers use deterministic exact evaluation; Monte
 Carlo is not required to reproduce them.
 
