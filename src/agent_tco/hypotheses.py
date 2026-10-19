@@ -1,7 +1,7 @@
 """Reproducible stylized computational tests for the five paper hypotheses.
 
 These experiments test implications of the declared workflow model. They are not
-field validation: profile parameters are synthetic, and deployment claims require
+field validation: profile parameters are constructed, and deployment claims require
 measured trajectories from the target agent and workload.
 """
 from __future__ import annotations
@@ -215,7 +215,7 @@ def _importance_review_alignment() -> dict[str, Any]:
 
 
 def run_stylized_hypothesis_tests(n_runs: int = 50_000, seed: int = 20260924) -> dict[str, Any]:
-    """Run the five synthetic hypothesis checks and return JSON-ready results.
+    """Run the five constructed hypothesis checks and return JSON-ready results.
 
     Args:
         n_runs: Monte Carlo runs for the dependent-error comparison in H3.

@@ -1,8 +1,7 @@
-"""Reproducible synthetic inputs for the companion paper.
+"""Reproducible constructed inputs for the companion paper.
 
-The profiles in this module reproduce the worked examples in *Beyond Point
-Solutions: Cost-Quality Optimization of Multi-Model Agentic Workflows*.  They
-are synthetic verification inputs, not estimates for a production deployment.
+The profiles in this module reproduce the worked examples in the companion paper.  They
+are constructed verification inputs, not estimates for a production deployment.
 """
 from __future__ import annotations
 
